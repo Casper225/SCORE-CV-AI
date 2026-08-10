@@ -1,0 +1,109 @@
+# Environment variables - SECRETS
+.env
+.env.local
+.env*.local
+.env.*.local
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Streamlit
+.streamlit/
+.streamlit/secrets.toml
+.streamlit/cache/
+.streamlit/logger.log
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+.LSOverride
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+*.log.*
+*.swp
+*~
+.#*
+
+# Test files & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+test_cvs/
+test_output/
+test_results/
+
+# Cache
+*.cache
+.cache/
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Data files (if large)
+# data/*.csv
+# data/*.xlsx
+# uploads/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Package files
+*.whl
+*.tar.gz
+
+# Distribution
+build/
+dist/
+*.egg-info/

@@ -1,0 +1,20 @@
+# Score CV AI - Production Requirements
+
+# Core NLP & ML
+pdfplumber
+easyocr
+pdf2image
+python-docx
+spacy
+scikit-learn
+pandas
+numpy
+
+# Web & API
+streamlit
+requests
+python-dotenv
+
+# Image Processing
+pillow
+
