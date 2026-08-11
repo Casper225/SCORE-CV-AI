@@ -629,10 +629,11 @@ input_cv, input_job = st.columns([0.9, 1.1], gap="large")
 with input_cv:
     with st.container(border=True):
         st.markdown('<div class="panel-title">Document candidat</div>', unsafe_allow_html=True)
-        st.caption("Importez le CV à analyser")
-        uploaded_file = st.file_uploader(
+        st.caption("Importez jusqu’à 5 CV à analyser")
+        uploaded_files = st.file_uploader(
             "CV",
             type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
             label_visibility="collapsed",
         )
 
@@ -651,42 +652,60 @@ run_pipeline = st.button("Lancer l'analyse du profil", use_container_width=True)
 # -----------------------------------------------------------------------------
 
 if run_pipeline:
-    if uploaded_file is None:
-        st.warning("Importez un CV avant de lancer l'analyse.")
+    if not uploaded_files:
+        st.warning("Importez au moins un CV avant de lancer l'analyse.")
+        st.stop()
+    if len(uploaded_files) > 5:
+        st.warning("Vous pouvez analyser au maximum 5 CV à la fois.")
         st.stop()
     if not job_text.strip():
         st.warning("Ajoutez une description de poste avant de lancer l'analyse.")
         st.stop()
 
-    with st.spinner("Extraction, NLP et scoring en cours…"):
-        cv_raw = extract_text(uploaded_file)
-        if not cv_raw:
-            st.error("Le contenu du CV n'a pas pu être extrait. Vérifiez le format ou la qualité du document.")
+    with st.spinner(f"Analyse de {len(uploaded_files)} CV en cours…"):
+        job_clean = clean_text(job_text)
+        analysis_results = []
+        failed_files = []
+
+        for uploaded_file in uploaded_files[:5]:
+            cv_raw = extract_text(uploaded_file)
+            if not cv_raw:
+                failed_files.append(uploaded_file.name)
+                continue
+
+            cv_clean = clean_text(cv_raw)
+            entities = extract_entities(cv_raw, cv_clean)
+            relationships = extract_relationships(entities, job_clean)
+            similarity = compute_similarity(cv_clean, job_clean)
+            score, features = compute_score(entities, relationships, similarity)
+            analysis_results.append({
+                "score": score,
+                "tfidf": similarity,
+                "entities": entities,
+                "relationships": relationships,
+                "features": features,
+                "filename": uploaded_file.name,
+            })
+
+        if not analysis_results:
+            st.error("Aucun CV n'a pu être analysé. Vérifiez les formats et le contenu des fichiers.")
             st.stop()
 
-        cv_clean = clean_text(cv_raw)
-        job_clean = clean_text(job_text)
-        entities = extract_entities(cv_raw, cv_clean)
-        relationships = extract_relationships(entities, job_clean)
-        similarity = compute_similarity(cv_clean, job_clean)
-        score, features = compute_score(entities, relationships, similarity)
-        analysis_result = {
-            "score": score,
-            "tfidf": similarity,
-            "entities": entities,
-            "relationships": relationships,
-            "features": features,
-            "filename": uploaded_file.name,
-        }
-        st.session_state["results"] = analysis_result
-        st.session_state["history"].insert(0, {
-            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-            "filename": uploaded_file.name,
-            "candidate_name": entities.get("candidate_name", "Candidat non identifié"),
-            "score": score,
-            "status": status_for_score(score)[0],
-        })
+        st.session_state["batch_results"] = analysis_results
+        st.session_state["results"] = analysis_results[0]
+        analysis_date = datetime.now().strftime("%d/%m/%Y %H:%M")
+        for analysis_result in analysis_results:
+            entities = analysis_result["entities"]
+            st.session_state["history"].insert(0, {
+                "date": analysis_date,
+                "filename": analysis_result["filename"],
+                "candidate_name": entities.get("candidate_name", "Candidat non identifié"),
+                "score": analysis_result["score"],
+                "status": status_for_score(analysis_result["score"])[0],
+            })
         st.session_state["history"] = st.session_state["history"][:25]
+        if failed_files:
+            st.warning("Fichiers non analysés : " + ", ".join(failed_files))
 
 
 # -----------------------------------------------------------------------------
@@ -713,12 +732,38 @@ if st.session_state["show_history"]:
 
 
 # -----------------------------------------------------------------------------
+# Multi-CV comparison
+# -----------------------------------------------------------------------------
+
+batch_results = st.session_state.get("batch_results", [])
+if len(batch_results) > 1:
+    st.markdown('<div class="section-label">Comparatif des CV</div>', unsafe_allow_html=True)
+    comparison_rows = [
+        {
+            "Rang": index + 1,
+            "Candidat": item["entities"].get("candidate_name", "Candidat non identifié"),
+            "CV": item["filename"],
+            "Score": f'{item["score"]}%',
+            "Statut": status_for_score(item["score"])[0],
+        }
+        for index, item in enumerate(sorted(batch_results, key=lambda entry: entry["score"], reverse=True))
+    ]
+    st.dataframe(comparison_rows, use_container_width=True, hide_index=True, height=min(280, max(120, 38 * len(comparison_rows) + 42)))
+    selected_index = st.selectbox(
+        "Afficher le détail d’un CV",
+        options=list(range(len(batch_results))),
+        format_func=lambda index: f'{batch_results[index]["entities"].get("candidate_name", "Candidat non identifié")} — {batch_results[index]["score"]}% ({batch_results[index]["filename"]})',
+    )
+    st.session_state["results"] = batch_results[selected_index]
+
+
+# -----------------------------------------------------------------------------
 # Results dashboard
 # -----------------------------------------------------------------------------
 
 if "results" not in st.session_state:
     st.markdown(
-        '<div class="empty-state"><strong>Votre tableau de bord apparaîtra ici</strong>Importez un CV et lancez l’analyse pour obtenir le score de compatibilité, les compétences détectées et les recommandations.</div>',
+        '<div class="empty-state"><strong>Votre tableau de bord apparaîtra ici</strong>Importez jusqu’à 5 CV, ajoutez une offre d’emploi et lancez l’analyse pour comparer les scores de compatibilité et explorer chaque profil.</div>',
         unsafe_allow_html=True,
     )
 else:
