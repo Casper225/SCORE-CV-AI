@@ -17,4 +17,5 @@ python-dotenv
 
 # Image Processing
 pillow
+openpyxl
 

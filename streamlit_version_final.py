@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import html
 import re
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -43,6 +44,15 @@ try:
     import requests
 except ImportError:
     requests = None
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+except ImportError:
+    Workbook = None
+    Alignment = Font = PatternFill = None
+    get_column_letter = None
 
 
 # -----------------------------------------------------------------------------
@@ -180,7 +190,7 @@ st.markdown(
     }}
 
     .panel {{
-        min-height: 145px; padding: 1.1rem 1.2rem; background: var(--surface);
+        min-height: 0; padding: 1.1rem 1.2rem; background: var(--surface);
         border: 1px solid var(--border); border-radius: 16px;
         box-shadow: 0 5px 18px rgba(16,24,40,.035);
     }}
@@ -193,6 +203,22 @@ st.markdown(
     }}
     [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stFileUploader"] {{
         background: #FAFAFF;
+    }}
+    /* Grille d’entrée : les deux panneaux conservent la même hauteur */
+    [data-testid="stHorizontalBlock"]:has([data-testid="stFileUploader"]) [data-testid="stVerticalBlockBorderWrapper"] {{
+        min-height: 220px;
+        box-sizing: border-box;
+    }}
+    [data-testid="stHorizontalBlock"]:has([data-testid="stFileUploader"]) [data-testid="stTextArea"] textarea {{
+        min-height: 118px;
+    }}
+    .overview-panel {{ min-height: 236px; box-sizing: border-box; }}
+    .result-panel {{ min-height: 156px; box-sizing: border-box; }}
+    [data-testid="stDataFrame"] {{
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        background: var(--surface);
     }}
 
     .panel-title {{ margin: 0 0 .85rem; font-family: 'Space Grotesk'; font-size: 1rem; font-weight: 700; color: var(--dark); }}
@@ -209,7 +235,7 @@ st.markdown(
     .score-progress {{ height: 7px; margin-top: 1.3rem; border-radius: 99px; background: rgba(255,255,255,.22); overflow: hidden; }}
     .score-progress > div {{ height: 100%; border-radius: inherit; background: #FFFFFF; }}
 
-    .metric-box {{ padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; min-height: 112px; }}
+    .metric-box {{ padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; min-height: 0; }}
     .metric-label {{ color: var(--muted); font-size: .76rem; font-weight: 600; }}
     .metric-value {{ margin-top: .4rem; color: var(--dark); font-family: 'Space Grotesk'; font-size: 1.65rem; font-weight: 700; }}
     .metric-caption {{ color: var(--muted); font-size: .75rem; }}
@@ -366,10 +392,32 @@ def extract_entities(raw_text: str, cleaned_text: str) -> Dict[str, Any]:
     if valid_values:
         entities["years_experience"] = max(valid_values)
 
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    for line in lines[:8]:
-        if len(line.split()) in (2, 3) and not any(char.isdigit() for char in line) and "@" not in line:
-            entities["candidate_name"] = line.title()
+    lines = [re.sub(r"^[•|\-–—]+\s*", "", line.strip()) for line in raw_text.splitlines() if line.strip()]
+    name_labels = re.compile(r"^(?:nom(?: complet)?|name|candidat|candidate)\s*[:\-–—]\s*(.+)$", re.IGNORECASE)
+    excluded = {
+        "curriculum vitae", "resume", "cv", "profil professionnel", "professional profile",
+        "coordonnées", "contact", "expérience professionnelle", "formation", "compétences",
+        "skills", "education", "expérience", "experience",
+    }
+    for line in lines[:15]:
+        labeled = name_labels.match(line)
+        if labeled:
+            candidate = labeled.group(1).strip()
+            if candidate:
+                entities["candidate_name"] = candidate.title()
+                break
+        normalized = re.sub(r"[^a-zA-ZÀ-ÿ' -]", "", line).strip()
+        words = normalized.split()
+        lowered = normalized.lower()
+        if (
+            2 <= len(words) <= 4
+            and lowered not in excluded
+            and not any(char.isdigit() for char in line)
+            and "@" not in line
+            and not any(token in lowered for token in ("téléphone", "phone", "linkedin", "github", "http"))
+            and len(normalized) >= 5
+        ):
+            entities["candidate_name"] = " ".join(word.capitalize() for word in words)
             break
 
     entities["skills"] = [skill for skill in SKILL_TAXONOMY if contains_term(cleaned_text, skill)]
@@ -442,10 +490,85 @@ def info_row(label: str, value: Any) -> str:
     return f'<div class="info-row"><span class="info-label">{esc(label)}</span><span class="info-value">{esc(value)}</span></div>'
 
 
+def build_excel_report(result: Dict[str, Any]) -> bytes:
+    """Construit un rapport Excel lisible et prêt à partager."""
+    if Workbook is None:
+        raise RuntimeError("La dépendance openpyxl est absente. Ajoutez openpyxl à requirements.txt.")
+
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Résumé"
+    details = workbook.create_sheet("Compétences")
+
+    navy = "102A43"
+    green = "2E8B68"
+    light_blue = "EAF2F8"
+    light_green = "EAF7F0"
+    gray = "667085"
+
+    summary.merge_cells("A1:D1")
+    summary["A1"] = "SCORE CV AI — RAPPORT D'ANALYSE"
+    summary["A1"].font = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
+    summary["A1"].fill = PatternFill("solid", fgColor=navy)
+    summary["A1"].alignment = Alignment(horizontal="center")
+
+    result_entities = result["entities"]
+    summary_rows = [
+        ("Score global", f'{result["score"]}%'),
+        ("Statut", result.get("status_label", "")),
+        ("Fichier analysé", result["filename"]),
+        ("Candidat", result_entities["candidate_name"]),
+        ("Email", result_entities["email"]),
+        ("Téléphone", result_entities["phone"]),
+        ("Expérience", f'{result_entities["years_experience"]} an(s)'),
+        ("Similarité textuelle", f'{result["tfidf"]:.1f}%'),
+        ("Compétences couvertes", f'{result["features"]["skill_match_ratio"] * 100:.0f}%'),
+        ("Soft skills", f'{result["features"]["soft_skills_score"] * 100:.0f}%'),
+    ]
+    for row_index, (label, value) in enumerate(summary_rows, start=3):
+        summary.cell(row_index, 1, label)
+        summary.cell(row_index, 2, value)
+        summary.cell(row_index, 1).font = Font(bold=True, color=gray)
+        summary.cell(row_index, 2).font = Font(bold=row_index == 3, color=navy if row_index == 3 else "1D2939")
+        if row_index == 3:
+            summary.cell(row_index, 2).fill = PatternFill("solid", fgColor=light_green)
+
+    details.append(["Compétence", "Statut"])
+    for cell in details[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=green)
+    matched = {item["skill"] for item in result["relationships"]["matched_relationships"]}
+    missing = {item["skill"] for item in result["relationships"]["missing_relationships"]}
+    for skill in sorted(matched | missing):
+        details.append([skill, "Confirmée" if skill in matched else "À renforcer"])
+    for row in details.iter_rows(min_row=2, max_col=2):
+        row[1].fill = PatternFill("solid", fgColor=light_green if row[1].value == "Confirmée" else "FCEBEA")
+
+    for sheet in (summary, details):
+        sheet.freeze_panes = "A3" if sheet.title == "Résumé" else "A2"
+        sheet.column_dimensions["A"].width = 28
+        sheet.column_dimensions["B"].width = 42
+        for row in sheet.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def skill_html(items: List[str], kind: str) -> str:
     if not items:
         return '<span style="color:#98A2B3;font-size:.82rem">Aucun élément détecté.</span>'
     return '<div class="skill-wrap">' + "".join(f'<span class="skill {kind}">{esc(item)}</span>' for item in items) + "</div>"
+
+
+# -----------------------------------------------------------------------------
+# Session state
+# -----------------------------------------------------------------------------
+
+st.session_state.setdefault("history", [])
+st.session_state.setdefault("show_history", False)
 
 
 # -----------------------------------------------------------------------------
@@ -456,14 +579,10 @@ with st.sidebar:
     st.markdown("## Score CV AI")
     st.caption("Analyse intelligente du matching candidat–poste")
     st.markdown("---")
-    st.markdown("### Paramètres")
-    secret_key = read_secret("JSEARCH_API_KEY")
-    jsearch_key = st.text_input(
-        "Clé RapidAPI JSearch",
-        value=secret_key,
-        type="password",
-        help="Optionnelle. Elle active l'analyse de la demande du marché.",
-    )
+    if st.button("Historique des analyses", use_container_width=True):
+        st.session_state["show_history"] = not st.session_state["show_history"]
+    if st.session_state["history"]:
+        st.caption(f'{len(st.session_state["history"])} analyse(s) enregistrée(s) dans cette session')
     st.markdown("---")
     st.markdown("### Parcours recommandé")
     st.caption("1. Importez un CV.\n2. Collez l'offre d'emploi.\n3. Lancez l'analyse.\n4. Explorez le score et les écarts.")
@@ -481,13 +600,6 @@ if BANNER_PATH.exists():
         f"""
         <div class="hero-wrap">
           <img src="data:image/png;base64,{banner_b64}" alt="Bannière ScoreCV" />
-          <div class="hero-overlay">
-            <div class="hero-copy">
-              <div class="hero-kicker">AI recruitment intelligence</div>
-              <h1 class="hero-title">Le bon talent, au bon moment.</h1>
-              <p class="hero-description">Une analyse claire, structurée et orientée décision pour accélérer le matching entre candidats et opportunités.</p>
-            </div>
-          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -528,7 +640,7 @@ with input_job:
     with st.container(border=True):
         st.markdown("<div class='panel-title'>Offre d'emploi</div>", unsafe_allow_html=True)
         st.caption("Décrivez le poste et les compétences recherchées")
-        job_text = st.text_area("Description", value=DEFAULT_JOB, height=118, label_visibility="collapsed")
+        job_text = st.text_area("Description", value="", height=118, placeholder="Collez ici la description du poste et les compétences recherchées…", label_visibility="collapsed")
 
 st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 run_pipeline = st.button("Lancer l'analyse du profil", use_container_width=True)
@@ -558,18 +670,46 @@ if run_pipeline:
         relationships = extract_relationships(entities, job_clean)
         similarity = compute_similarity(cv_clean, job_clean)
         score, features = compute_score(entities, relationships, similarity)
-        job_title = next((line.strip() for line in job_text.splitlines() if line.strip()), "Poste ciblé")[:100]
-        market = search_market(job_title, jsearch_key)
-
-        st.session_state["results"] = {
+        analysis_result = {
             "score": score,
             "tfidf": similarity,
             "entities": entities,
             "relationships": relationships,
             "features": features,
-            "market": market,
             "filename": uploaded_file.name,
         }
+        st.session_state["results"] = analysis_result
+        st.session_state["history"].insert(0, {
+            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "filename": uploaded_file.name,
+            "candidate_name": entities.get("candidate_name", "Candidat non identifié"),
+            "score": score,
+            "status": status_for_score(score)[0],
+        })
+        st.session_state["history"] = st.session_state["history"][:25]
+
+
+# -----------------------------------------------------------------------------
+# History dashboard
+# -----------------------------------------------------------------------------
+
+if st.session_state["show_history"]:
+    st.markdown('<div class="section-label">Historique des analyses</div>', unsafe_allow_html=True)
+    if st.session_state["history"]:
+        history_rows = [
+            {
+                "Date": item["date"],
+                "CV analysé": item["filename"],
+                "Candidat": item["candidate_name"],
+                "Score": f'{item["score"]}%',
+                "Statut": item["status"],
+            }
+            for item in st.session_state["history"]
+        ]
+        table_height = min(360, max(120, 38 * len(history_rows) + 42))
+        st.dataframe(history_rows, use_container_width=True, hide_index=True, height=table_height)
+    else:
+        st.info("Aucune analyse enregistrée pour le moment. Lancez une analyse pour alimenter l’historique.")
 
 
 # -----------------------------------------------------------------------------
@@ -585,12 +725,12 @@ else:
     result = st.session_state["results"]
     score = int(result["score"])
     status_label, status_color = status_for_score(score)
+    result["status_label"] = status_label
     entities = result["entities"]
     relationships = result["relationships"]
-    market = result["market"]
 
     st.markdown('<div class="section-label">Vue d’ensemble</div>', unsafe_allow_html=True)
-    score_col, profile_col, market_col = st.columns([0.9, 1.25, 0.85], gap="large")
+    score_col, profile_col = st.columns([0.9, 1.25], gap="large")
 
     with score_col:
         st.markdown(
@@ -608,7 +748,7 @@ else:
 
     with profile_col:
         profile_html = (
-            '<div class="panel">'
+            '<div class="panel overview-panel">'
             '<div class="panel-kicker">Profil extrait</div>'
             '<div class="panel-title">Informations détectées</div>'
             + info_row("Candidat", entities["candidate_name"])
@@ -618,19 +758,6 @@ else:
             + '</div>'
         )
         st.markdown(profile_html, unsafe_allow_html=True)
-
-    with market_col:
-        market_body = (
-            info_row("Niveau", market["market_demand"])
-            + info_row("Offres trouvées", f'{market["results_found"]} opportunité(s)')
-            if market["status"] == "LIVE"
-            else '<div style="color:#98A2B3;font-size:.82rem;line-height:1.45">Clé JSearch non configurée. Le score CV reste disponible sans l’analyse marché.</div>'
-        )
-        st.markdown(
-            '<div class="panel"><div class="panel-kicker">Signal marché</div><div class="panel-title">Demande observée</div>'
-            + market_body + '</div>',
-            unsafe_allow_html=True,
-        )
 
     st.markdown('<div class="section-label">Indicateurs de matching</div>', unsafe_allow_html=True)
     metric_a, metric_b, metric_c, metric_d = st.columns(4, gap="medium")
@@ -648,7 +775,7 @@ else:
     skills_ok, skills_missing = st.columns(2, gap="large")
     with skills_ok:
         st.markdown(
-            '<div class="panel"><div class="panel-kicker" style="color:#067647">Correspondances positives</div>'
+            '<div class="panel result-panel"><div class="panel-kicker" style="color:#067647">Correspondances positives</div>'
             '<div class="panel-title">Compétences confirmées</div>'
             + skill_html([item["skill"] for item in relationships["matched_relationships"]], "ok")
             + '</div>',
@@ -656,7 +783,7 @@ else:
         )
     with skills_missing:
         st.markdown(
-            '<div class="panel"><div class="panel-kicker" style="color:#B42318">Écarts à traiter</div>'
+            '<div class="panel result-panel"><div class="panel-kicker" style="color:#B42318">Écarts à traiter</div>'
             '<div class="panel-title">Compétences manquantes</div>'
             + skill_html([item["skill"] for item in relationships["missing_relationships"]], "missing")
             + '</div>',
@@ -667,21 +794,27 @@ else:
     soft_col, lang_col, export_col = st.columns([1, 1, 1], gap="large")
     with soft_col:
         st.markdown(
-            '<div class="panel"><div class="panel-kicker">Comportemental</div><div class="panel-title">Soft skills détectées</div>'
+            '<div class="panel result-panel"><div class="panel-kicker">Comportemental</div><div class="panel-title">Soft skills détectées</div>'
             + skill_html(entities["soft_skills"], "neutral") + '</div>',
             unsafe_allow_html=True,
         )
     with lang_col:
         st.markdown(
-            '<div class="panel"><div class="panel-kicker">Communication</div><div class="panel-title">Langues détectées</div>'
+            '<div class="panel result-panel"><div class="panel-kicker">Communication</div><div class="panel-title">Langues détectées</div>'
             + skill_html(entities["languages"], "neutral") + '</div>',
             unsafe_allow_html=True,
         )
     with export_col:
         with st.container(border=True):
             st.markdown('<div class="panel-kicker">Traçabilité</div><div class="panel-title">Exporter le résultat</div>', unsafe_allow_html=True)
-            export_text = f"Score CV AI\nScore: {score}%\nStatut: {status_label}\nFichier: {result['filename']}\nCompétences confirmées: {', '.join(item['skill'] for item in relationships['matched_relationships'])}\nCompétences manquantes: {', '.join(item['skill'] for item in relationships['missing_relationships'])}"
-            st.download_button("Télécharger le résumé", data=export_text, file_name="score_cv_ai_resultat.txt", mime="text/plain", use_container_width=True)
+            excel_data = build_excel_report(result)
+            st.download_button(
+                "Télécharger le rapport Excel",
+                data=excel_data,
+                file_name="score_cv_ai_rapport.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 
 # -----------------------------------------------------------------------------
